@@ -11,10 +11,10 @@
 // ==========================================
 // LITEWING v1.2 HARDWARE PINS (ESP32-S3)
 // ==========================================
-const int PIN_MOTOR_FL = 4;  // Front Left
-const int PIN_MOTOR_FR = 5;  // Front Right
-const int PIN_MOTOR_BL = 3;  // Back Left
-const int PIN_MOTOR_BR = 6;  // Back Right
+#define PIN_MOTOR_FL 4  // Front Left
+#define PIN_MOTOR_FR 5  // Front Right
+#define PIN_MOTOR_BL 3  // Back Left
+#define PIN_MOTOR_BR 6  // Back Right
 
 #define I2C_SDA 11      // MPU6050 SDA
 #define I2C_SCL 10      // MPU6050 SCL
@@ -53,8 +53,8 @@ float Kp_angle = 2.0;
 // Inner Loop (Rate)
 float Kp_rate = 1.0, Ki_rate = 0.0, Kd_rate = 0.001;
 float Kp_yaw_rate = 1.5, Ki_yaw_rate = 0.0, Kd_yaw_rate = 0.0;
-float pitch_rate_integral = 0, roll_rate_integral = 0;
-float pitch_prev_rate_error = 0, roll_prev_rate_error = 0;
+float pitch_rate_integral = 0, roll_rate_integral = 0, yaw_rate_integral = 0;
+float pitch_prev_rate_error = 0, roll_prev_rate_error = 0, yaw_prev_rate_error = 0;
 
 float gyroErrorX = 0, gyroErrorY = 0, gyroErrorZ = 0;
 float actual_pitch = 0.0, actual_roll  = 0.0, actual_yaw = 0.0;
@@ -196,6 +196,7 @@ void Task_FlightControl(void *pvParameters) {
     if (!is_flying) {
       pitch_rate_integral = 0;
       roll_rate_integral = 0;
+      yaw_rate_integral = 0;
       ledcWrite(PIN_MOTOR_FL, 0);
       ledcWrite(PIN_MOTOR_FR, 0);
       ledcWrite(PIN_MOTOR_BL, 0);
@@ -217,8 +218,8 @@ void Task_FlightControl(void *pvParameters) {
     float desired_roll_rate  = Kp_angle * roll_angle_error;
 
     // INNER LOOP: Rate PID 
-    float pitch_rate_error = desired_pitch_rate - gyroRateX;
-    float roll_rate_error  = desired_roll_rate  - gyroRateY;
+    float pitch_rate_error = desired_pitch_rate - gyroRateY;
+    float roll_rate_error  = desired_roll_rate  - gyroRateX;
     float yaw_rate_error   = local_target_yaw_rate - gyroRateZ; // Yaw goes straight to rate
 
     pitch_rate_integral += pitch_rate_error * LOOP_TIME_SEC;
@@ -238,10 +239,10 @@ void Task_FlightControl(void *pvParameters) {
     yaw_prev_rate_error   = yaw_rate_error;
 
     // Motor Mixing
-    int speed_FL = constrain(base_t + pitch_pid_output + roll_pid_output, 0, 800);
-    int speed_FR = constrain(base_t + pitch_pid_output - roll_pid_output, 0, 800);
-    int speed_BL = constrain(base_t - pitch_pid_output + roll_pid_output, 0, 800);
-    int speed_BR = constrain(base_t - pitch_pid_output - roll_pid_output, 0, 800);
+    int speed_FL = constrain(base_t + pitch_pid_output + roll_pid_output - yaw_pid_output, 0, 1023);
+    int speed_FR = constrain(base_t + pitch_pid_output - roll_pid_output + yaw_pid_output, 0, 1023);
+    int speed_BL = constrain(base_t - pitch_pid_output + roll_pid_output + yaw_pid_output, 0, 1023);
+    int speed_BR = constrain(base_t - pitch_pid_output - roll_pid_output - yaw_pid_output, 0, 1023);
 
     // Write speeds
     ledcWrite(PIN_MOTOR_FL, speed_FL);
@@ -337,35 +338,64 @@ float invSqrt(float x) {
 }
 
 void Mahony_Update(float gx, float gy, float gz, float ax, float ay, float az, float dt) {
-    float recipNorm = invSqrt(ax * ax + ay * ay + az * az);
-    ax *= recipNorm; ay *= recipNorm; az *= recipNorm;
+    float recipNorm;
+    float halfvx, halfvy, halfvz;
+    float halfex, halfey, halfez;
+    float qa, qb, qc;
 
-    float halfvx = q1 * q3 - q0 * q2;
-    float halfvy = q0 * q1 + q2 * q3;
-    float halfvz = q0 * q0 - 0.5f + q3 * q3;
+    // 1. ESP-Drone Safety Check: Prevent NaN from zero-g or boot errors
+    if(!((ax == 0.0f) && (ay == 0.0f) && (az == 0.0f))) {
+        recipNorm = invSqrt(ax * ax + ay * ay + az * az);
+        ax *= recipNorm; 
+        ay *= recipNorm; 
+        az *= recipNorm;
 
-    float halfex = (ay * halfvz - az * halfvy);
-    float halfey = (az * halfvx - ax * halfvz);
-    float halfez = (ax * halfvy - ay * halfvx);
+        halfvx = q1 * q3 - q0 * q2;
+        halfvy = q0 * q1 + q2 * q3;
+        halfvz = q0 * q0 - 0.5f + q3 * q3;
 
-    integralFBx += twoKiDef * halfex * dt;
-    integralFBy += twoKiDef * halfey * dt;
-    integralFBz += twoKiDef * halfez * dt;
+        halfex = (ay * halfvz - az * halfvy);
+        halfey = (az * halfvx - ax * halfvz);
+        halfez = (ax * halfvy - ay * halfvx);
 
-    gx += twoKpDef * halfex + integralFBx;
-    gy += twoKpDef * halfey + integralFBy;
-    gz += twoKpDef * halfez + integralFBz;
+        // 2. ESP-Drone Integral Reset
+        if(twoKiDef > 0.0f) {
+            integralFBx += twoKiDef * halfex * dt;
+            integralFBy += twoKiDef * halfey * dt;
+            integralFBz += twoKiDef * halfez * dt;
+            gx += integralFBx;
+            gy += integralFBy;
+            gz += integralFBz;
+        } else {
+            integralFBx = 0.0f;
+            integralFBy = 0.0f;
+            integralFBz = 0.0f;
+        }
 
-    gx *= (0.5f * dt); gy *= (0.5f * dt); gz *= (0.5f * dt);
-    float qa = q0, qb = q1, qc = q2;
+        gx += twoKpDef * halfex;
+        gy += twoKpDef * halfey;
+        gz += twoKpDef * halfez;
+    }
+
+    // Integrate rate of change of quaternion
+    gx *= (0.5f * dt); 
+    gy *= (0.5f * dt); 
+    gz *= (0.5f * dt);
+    
+    qa = q0; qb = q1; qc = q2;
     q0 += (-qb * gx - qc * gy - q3 * gz);
     q1 += (qa * gx + qc * gz - q3 * gy);
     q2 += (qa * gy - qb * gz + q3 * gx);
     q3 += (qa * gz + qb * gy - qc * gx);
 
+    // Normalize quaternion
     recipNorm = invSqrt(q0 * q0 + q1 * q1 + q2 * q2 + q3 * q3);
-    q0 *= recipNorm; q1 *= recipNorm; q2 *= recipNorm; q3 *= recipNorm;
+    q0 *= recipNorm; 
+    q1 *= recipNorm; 
+    q2 *= recipNorm; 
+    q3 *= recipNorm;
 
+    // 3. Extract all three angles (in Degrees)
     actual_roll  = atan2(2.0f * (q0 * q1 + q2 * q3), q0 * q0 - q1 * q1 - q2 * q2 + q3 * q3) * 57.2958f;
     actual_pitch = asin(constrain(2.0f * (q0 * q2 - q3 * q1), -1.0f, 1.0f)) * 57.2958f;
     actual_yaw   = atan2(2.0f * (q0 * q3 + q1 * q2), q0 * q0 + q1 * q1 - q2 * q2 - q3 * q3) * 57.2958f;
