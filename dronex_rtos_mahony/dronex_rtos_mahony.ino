@@ -38,6 +38,7 @@ volatile bool calibrate_done = false;
 // ROS/Commander Targets
 volatile float target_pitch = 0.0;
 volatile float target_roll  = 0.0;
+volatile float target_yaw_rate = 0.0; // Yaw is usually driven by rate, not absolute angle
 
 // ==========================================
 // FLIGHT SETTINGS & CASCADED PID
@@ -51,18 +52,19 @@ float Kp_angle = 2.0;
 
 // Inner Loop (Rate)
 float Kp_rate = 1.0, Ki_rate = 0.0, Kd_rate = 0.001;
+float Kp_yaw_rate = 1.5, Ki_yaw_rate = 0.0, Kd_yaw_rate = 0.0;
 float pitch_rate_integral = 0, roll_rate_integral = 0;
 float pitch_prev_rate_error = 0, roll_prev_rate_error = 0;
 
 float gyroErrorX = 0, gyroErrorY = 0, gyroErrorZ = 0;
-float actual_pitch = 0.0, actual_roll  = 0.0;
+float actual_pitch = 0.0, actual_roll  = 0.0, actual_yaw = 0.0;
 
 // ==========================================
 // MAHONY FILTER GLOBALS
 // ==========================================
 float q0 = 1.0f, q1 = 0.0f, q2 = 0.0f, q3 = 0.0f; 
-float twoKpDef = 1.0f; 
-float twoKiDef = 0.0f; 
+float twoKpDef = 0.8f;   // From sensfusion6.c
+float twoKiDef = 0.002f; // From sensfusion6.c
 float integralFBx = 0.0f,  integralFBy = 0.0f, integralFBz = 0.0f;
 
 // Function Prototypes
@@ -160,14 +162,23 @@ void Task_FlightControl(void *pvParameters) {
     Wire.write(0x3B); 
     Wire.endTransmission(false);
     Wire.requestFrom(MPU_ADDR, (uint8_t)14, (uint8_t)true);
+
+    // Raw Reads
+    int16_t rawAccX = (Wire.read() << 8 | Wire.read()) + ACCEL_OFFSET_X;
+    int16_t rawAccY = (Wire.read() << 8 | Wire.read()) + ACCEL_OFFSET_Y;
+    int16_t rawAccZ = (Wire.read() << 8 | Wire.read()) + ACCEL_OFFSET_Z;
+    tempRaw         = (Wire.read() << 8 | Wire.read());
+    int16_t rawGyX  = (Wire.read() << 8 | Wire.read());
+    int16_t rawGyY  = (Wire.read() << 8 | Wire.read());
+    int16_t rawGyZ  = (Wire.read() << 8 | Wire.read());
     
-    accX    = (Wire.read() << 8 | Wire.read()) + ACCEL_OFFSET_X;
-    accY    = (Wire.read() << 8 | Wire.read()) + ACCEL_OFFSET_Y;
-    accZ    = (Wire.read() << 8 | Wire.read()) + ACCEL_OFFSET_Z;
-    tempRaw = (Wire.read() << 8 | Wire.read());
-    gyroX   = (Wire.read() << 8 | Wire.read());
-    gyroY   = (Wire.read() << 8 | Wire.read());
-    gyroZ   = (Wire.read() << 8 | Wire.read());
+    accX  = rawAccY;
+    accY  = -rawAccX;
+    accZ  = rawAccZ;
+    
+    gyroX = rawGyY;
+    gyroY = -rawGyX;
+    gyroZ = rawGyZ;
 
     // Gyro Rates (Degrees/sec for PID)
     float gyroRateX = (gyroX / 65.5) - gyroErrorX;
@@ -185,12 +196,17 @@ void Task_FlightControl(void *pvParameters) {
     if (!is_flying) {
       pitch_rate_integral = 0;
       roll_rate_integral = 0;
+      ledcWrite(PIN_MOTOR_FL, 0);
+      ledcWrite(PIN_MOTOR_FR, 0);
+      ledcWrite(PIN_MOTOR_BL, 0);
+      ledcWrite(PIN_MOTOR_BR, 0);
       continue;
     }
 
     // Grab thread-safe local copies of commander targets
     float local_target_pitch = target_pitch;
     float local_target_roll  = target_roll;
+    float local_target_yaw_rate = target_yaw_rate;
     int base_t = current_base_thrust; 
 
     // OUTER LOOP: Angle PID
@@ -203,15 +219,23 @@ void Task_FlightControl(void *pvParameters) {
     // INNER LOOP: Rate PID 
     float pitch_rate_error = desired_pitch_rate - gyroRateX;
     float roll_rate_error  = desired_roll_rate  - gyroRateY;
+    float yaw_rate_error   = local_target_yaw_rate - gyroRateZ; // Yaw goes straight to rate
 
     pitch_rate_integral += pitch_rate_error * LOOP_TIME_SEC;
     roll_rate_integral  += roll_rate_error  * LOOP_TIME_SEC;
+    yaw_rate_integral   += yaw_rate_error   * LOOP_TIME_SEC;
+
+    pitch_rate_integral = constrain(pitch_rate_integral, -400.0, 400.0);
+    roll_rate_integral  = constrain(roll_rate_integral,  -400.0, 400.0);
+    yaw_rate_integral   = constrain(yaw_rate_integral,   -400.0, 400.0);
 
     float pitch_pid_output = (Kp_rate * pitch_rate_error) + (Ki_rate * pitch_rate_integral) + (Kd_rate * (pitch_rate_error - pitch_prev_rate_error) / LOOP_TIME_SEC);
     float roll_pid_output  = (Kp_rate * roll_rate_error)  + (Ki_rate * roll_rate_integral)  + (Kd_rate * (roll_rate_error - roll_prev_rate_error) / LOOP_TIME_SEC);
+    float yaw_pid_output   = (Kp_yaw_rate * yaw_rate_error) + (Ki_yaw_rate * yaw_rate_integral) + (Kd_yaw_rate * (yaw_rate_error - yaw_prev_rate_error) / LOOP_TIME_SEC);
 
     pitch_prev_rate_error = pitch_rate_error;
     roll_prev_rate_error  = roll_rate_error;
+    yaw_prev_rate_error   = yaw_rate_error;
 
     // Motor Mixing
     int speed_FL = constrain(base_t + pitch_pid_output + roll_pid_output, 0, 800);
@@ -343,5 +367,6 @@ void Mahony_Update(float gx, float gy, float gz, float ax, float ay, float az, f
     q0 *= recipNorm; q1 *= recipNorm; q2 *= recipNorm; q3 *= recipNorm;
 
     actual_roll  = atan2(2.0f * (q0 * q1 + q2 * q3), q0 * q0 - q1 * q1 - q2 * q2 + q3 * q3) * 57.2958f;
-    actual_pitch = asin(2.0f * (q0 * q2 - q3 * q1)) * 57.2958f;
+    actual_pitch = asin(constrain(2.0f * (q0 * q2 - q3 * q1), -1.0f, 1.0f)) * 57.2958f;
+    actual_yaw   = atan2(2.0f * (q0 * q3 + q1 * q2), q0 * q0 + q1 * q1 - q2 * q2 - q3 * q3) * 57.2958f;
 }
