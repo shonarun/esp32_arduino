@@ -20,9 +20,9 @@
 #define I2C_SCL 10      // MPU6050 SCL
 
 const uint8_t MPU_ADDR = 0x68;
-const int16_t ACCEL_OFFSET_X = -83;
-const int16_t ACCEL_OFFSET_Y = -74;
-const int16_t ACCEL_OFFSET_Z = -28;
+const int16_t ACCEL_OFFSET_X =  1200; // -83, -367
+const int16_t ACCEL_OFFSET_Y = -1100; // -74,  235
+const int16_t ACCEL_OFFSET_Z =  1160; // -28,  890
 
 // ==========================================
 // RTOS TASK HANDLES & SHARED VARIABLES
@@ -52,7 +52,7 @@ float Kp_angle = 2.0;
 
 // Inner Loop (Rate)
 float Kp_rate = 1.0, Ki_rate = 0.0, Kd_rate = 0.001;
-float Kp_yaw_rate = 1.5, Ki_yaw_rate = 0.0, Kd_yaw_rate = 0.0;
+float Kp_yaw_rate = 1.5, Ki_yaw_rate = 0.1, Kd_yaw_rate = 0.0;
 float pitch_rate_integral = 0, roll_rate_integral = 0, yaw_rate_integral = 0;
 float pitch_prev_rate_error = 0, roll_prev_rate_error = 0, yaw_prev_rate_error = 0;
 
@@ -172,11 +172,11 @@ void Task_FlightControl(void *pvParameters) {
     int16_t rawGyY  = (Wire.read() << 8 | Wire.read());
     int16_t rawGyZ  = (Wire.read() << 8 | Wire.read());
     
-    accX  = rawAccY;
+    accX  = -rawAccY;
     accY  = -rawAccX;
     accZ  = rawAccZ;
     
-    gyroX = rawGyY;
+    gyroX = -rawGyY;
     gyroY = -rawGyX;
     gyroZ = rawGyZ;
 
@@ -239,10 +239,10 @@ void Task_FlightControl(void *pvParameters) {
     yaw_prev_rate_error   = yaw_rate_error;
 
     // Motor Mixing
-    int speed_FL = constrain(base_t + pitch_pid_output + roll_pid_output - yaw_pid_output, 0, 1023);
-    int speed_FR = constrain(base_t + pitch_pid_output - roll_pid_output + yaw_pid_output, 0, 1023);
-    int speed_BL = constrain(base_t - pitch_pid_output + roll_pid_output + yaw_pid_output, 0, 1023);
-    int speed_BR = constrain(base_t - pitch_pid_output - roll_pid_output - yaw_pid_output, 0, 1023);
+    int speed_FL = constrain(base_t + pitch_pid_output + roll_pid_output + yaw_pid_output, 0, 800);
+    int speed_FR = constrain(base_t + pitch_pid_output - roll_pid_output - yaw_pid_output, 0, 800);
+    int speed_BL = constrain(base_t - pitch_pid_output + roll_pid_output - yaw_pid_output, 0, 800);
+    int speed_BR = constrain(base_t - pitch_pid_output - roll_pid_output + yaw_pid_output, 0, 800);
 
     // Write speeds
     ledcWrite(PIN_MOTOR_FL, speed_FL);
@@ -282,7 +282,7 @@ void Task_Commander(void *pvParameters) {
     if (time_in_air < 1000) {
       current_base_thrust = map(time_in_air, 0, 1000, 0, HOVER_THRUST);
     } 
-    else if (time_in_air < 5000) {
+    else if (time_in_air < 4000) {
       current_base_thrust = HOVER_THRUST;
     } 
     else {
