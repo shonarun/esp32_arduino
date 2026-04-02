@@ -4,7 +4,8 @@
 #include <math.h>
 
 // Shared global data and FreeRTOS Spinlock (Mutex)
-volatile RawSensorData latest_sensor_data = {0,0,0,0,0,0};
+// REMOVED 'volatile' here to fix C++ struct assignment errors
+RawSensorData latest_sensor_data = {0,0,0,0,0,0};
 portMUX_TYPE sensor_mux = portMUX_INITIALIZER_UNLOCKED;
 
 // Mahony Filter variables
