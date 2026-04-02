@@ -16,7 +16,8 @@ struct RawSensorData {
     int16_t rawGyX, rawGyY, rawGyZ;
 };
 
-extern volatile RawSensorData latest_sensor_data;
+// REMOVED 'volatile' here because the mutex memory barrier handles synchronization
+extern RawSensorData latest_sensor_data;
 extern portMUX_TYPE sensor_mux; // Mutex for thread safety
 
 void initEstimator();
